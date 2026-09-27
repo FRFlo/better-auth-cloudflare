@@ -13,7 +13,7 @@ async function authBuilder() {
             {
                 autoDetectIpAddress: true,
                 geolocationTracking: true,
-                cf: cfCtx.cf,
+                cf: () => getCloudflareContext().cf,
                 d1: {
                     db: dbInstance,
                     options: {
@@ -85,21 +85,12 @@ async function authBuilder() {
                 emailVerification: {
                     sendOnSignUp: true,
                 },
+                verification: {
+                    storeInDatabase: true,
+                },
                 rateLimit: {
                     enabled: true,
-                    window: 60, // Minimum KV TTL is 60s
-                    max: 100, // reqs/window
-                    customRules: {
-                        // https://github.com/better-auth/better-auth/issues/5452
-                        "/sign-in/email": {
-                            window: 60,
-                            max: 100,
-                        },
-                        "/sign-in/social": {
-                            window: 60,
-                            max: 100,
-                        },
-                    },
+                    storage: "database",
                 },
                 plugins: [openAPI(), anonymous()],
             }
@@ -148,15 +139,19 @@ export const auth = betterAuth({
             // Include only configurations that influence the Drizzle schema,
             // e.g., if certain features add tables or columns.
             // socialProviders: { /* ... */ } // If they add specific tables/columns
+            rateLimit: {
+                enabled: true,
+                storage: "database",
+            },
             plugins: [openAPI(), anonymous()],
         }
     ),
 
     // Used by the Better Auth CLI for schema generation.
-    database: drizzleAdapter(process.env.DATABASE as any, {
-        // Added 'as any' to handle potential undefined process.env.DATABASE
+    database: drizzleAdapter({} as any, {
         provider: "sqlite",
         usePlural: true,
         debugLogs: true,
     }),
+    advanced: { database: { validateSchema: false } },
 });

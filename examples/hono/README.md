@@ -156,6 +156,12 @@ interface CloudflareBindings {
 }
 ```
 
+Set the session secret before deploying; without it Better Auth signs sessions with a default secret:
+
+```bash
+openssl rand -base64 48 | wrangler secret put BETTER_AUTH_SECRET
+```
+
 ### Better Auth Configuration
 
 The auth configuration in `src/auth/index.ts` uses a simplified single-function approach that handles both CLI schema generation and runtime scenarios:
@@ -198,21 +204,12 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                     enabled: true,
                 },
                 plugins: [anonymous()], // Enable anonymous authentication
+                verification: {
+                    storeInDatabase: true,
+                },
                 rateLimit: {
                     enabled: true,
-                    window: 60, // Minimum KV TTL is 60s
-                    max: 100, // reqs/window
-                    customRules: {
-                        // https://github.com/better-auth/better-auth/issues/5452
-                        "/sign-in/email": {
-                            window: 60,
-                            max: 100,
-                        },
-                        "/sign-in/social": {
-                            window: 60,
-                            max: 100,
-                        },
-                    },
+                    storage: "database",
                 },
             }
         ),
@@ -225,6 +222,7 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                       usePlural: true,
                       debugLogs: true,
                   }),
+                  advanced: { database: { validateSchema: false } },
               }),
     });
 }

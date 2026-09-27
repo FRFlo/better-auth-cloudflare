@@ -24,24 +24,26 @@ const auth = betterAuth({
 
 ### Override Behavior
 
-`withCloudflare` returns a merged config object. The following keys are **always set** by the wrapper and take precedence over values in `authOptions`:
+`withCloudflare` returns a merged config object:
 
 | Key                 | Behavior                                                                                                                                                    |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `database`          | Set from your `d1` / `d1Native` / `postgres` / `mysql` option. Omit `database` from `authOptions`.                                                          |
-| `secondaryStorage`  | Set to `createKVStorage(kv)` when `kv` is provided, otherwise `undefined`. Omit from `authOptions`.                                                         |
+| `database`          | Set from `d1` / `d1Native` / `postgres` / `mysql` when provided. Otherwise preserves `authOptions.database`.                                                |
+| `secondaryStorage`  | Set to `createKVStorage(kv)` when `kv` is provided. Otherwise preserves `authOptions.secondaryStorage`. Supplying both `kv` and a custom store throws.      |
 | `plugins`           | The `cloudflare()` plugin is prepended to your `authOptions.plugins` array.                                                                                 |
 | `advanced`          | Merges your `authOptions.advanced` with IP detection headers when `autoDetectIpAddress` is enabled.                                                         |
 | `session`           | Merges your `authOptions.session`, forcing `storeSessionInDatabase: true` when `geolocationTracking` is enabled — even if you explicitly set it to `false`. |
 | `emailVerification` | Adds a Cloudflare Email `sendVerificationEmail` callback when `email` is configured and no custom callback exists.                                          |
 | `emailAndPassword`  | Adds a Cloudflare Email `sendResetPassword` callback when `email` is configured and `emailAndPassword` is enabled and no custom callback exists.            |
 
-If you need a custom `secondaryStorage` that is not KV, omit the `kv` option and set `secondaryStorage` outside the spread:
+If you need a custom `secondaryStorage` that is not KV, omit the `kv` option and pass it through `authOptions`:
 
 ```typescript
 const auth = betterAuth({
-    ...withCloudflare(cloudflareOpts, authOpts),
-    secondaryStorage: myCustomStorage,
+    ...withCloudflare(cloudflareOpts, {
+        ...authOpts,
+        secondaryStorage: myCustomStorage,
+    }),
 });
 ```
 
@@ -53,7 +55,7 @@ Extends [`CloudflarePluginOptions`](#cloudflarepluginoptions) with database, KV,
 
 ### Database Options
 
-Only **one** database option may be provided — passing more than one throws at startup. All are optional; omitting them all is valid for CLI schema generation (`database` will be `undefined`).
+Only **one** database option may be provided. Passing more than one throws at startup. All are optional; when none is supplied, `authOptions.database` is preserved.
 
 | Option     | Type                                    | Description                                                          |
 | ---------- | --------------------------------------- | -------------------------------------------------------------------- |
@@ -91,12 +93,12 @@ The `provider` is inferred from which option you use (`"sqlite"` / `"pg"` / `"my
 
 Inherited by `WithCloudflareOptions`.
 
-| Option                | Type                                          | Default     | Description                                                                                                                   |
-| --------------------- | --------------------------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `autoDetectIpAddress` | `boolean`                                     | `true`      | Adds `cf-connecting-ip` and `x-real-ip` to IP detection headers.                                                              |
-| `geolocationTracking` | `boolean`                                     | `true`      | Enriches sessions with geolocation fields. Overrides `session.storeSessionInDatabase` to `true`.                              |
-| `cf`                  | `CloudflareGeolocation \| Promise<…> \| null` | `undefined` | **Required** unless both options above are disabled. Typically `request.cf` (Hono) or `getCloudflareContext().cf` (OpenNext). |
-| `r2`                  | `R2Config`                                    | `undefined` | R2 bucket configuration. See the [R2 File Storage Guide](./r2.md).                                                            |
+| Option                | Type                                                       | Default     | Description                                                                                                                                                      |
+| --------------------- | ---------------------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `autoDetectIpAddress` | `boolean`                                                  | `true`      | Adds `cf-connecting-ip` and `x-real-ip` to IP detection headers.                                                                                                 |
+| `geolocationTracking` | `boolean`                                                  | `true`      | Enriches sessions with geolocation fields. Overrides `session.storeSessionInDatabase` to `true`.                                                                 |
+| `cf`                  | `CloudflareGeolocation \| Promise<…> \| (() => …) \| null` | `undefined` | **Required** unless both options above are disabled. Use `request.cf` in Hono, or `() => getCloudflareContext().cf` when one auth instance serves many requests. |
+| `r2`                  | `R2Config`                                                 | `undefined` | R2 bucket configuration. See the [R2 File Storage Guide](./r2.md).                                                                                               |
 
 ### `CloudflareGeolocation`
 
@@ -121,7 +123,7 @@ This is the subset of Cloudflare's `IncomingRequestCfProperties` that the librar
 
 ## KV Secondary Storage
 
-Passing `kv` to `withCloudflare` enables [Better Auth Secondary Storage](https://www.better-auth.com/docs/concepts/database#secondary-storage) backed by Cloudflare KV — used for rate limiting, session caching, and verification tokens.
+Passing `kv` to `withCloudflare` enables [Better Auth Secondary Storage](https://www.better-auth.com/docs/concepts/database#secondary-storage) backed by Cloudflare KV.
 
 ```typescript
 withCloudflare(
@@ -131,14 +133,31 @@ withCloudflare(
         cf: request.cf,
     },
     {
-        rateLimit: { enabled: true, window: 60, max: 100 },
+        verification: { storeInDatabase: true },
+        rateLimit: { enabled: true, storage: "database" },
     }
 );
 ```
 
+Better Auth 1.7 requires atomic `getAndDelete` and `increment` operations. Workers KV cannot provide them. The configuration above keeps KV session caching but routes verification consumption and rate limiting to the database explicitly.
+
+`withCloudflare()` validates the required routing when Better Auth initializes. It never selects database or memory storage automatically.
+
+This is a cost and latency choice, not a transparent compatibility shim. Database rate limiting typically adds at least one database read and one write to accepted Better Auth requests. Contention, resets, cleanup, and rejected requests can add operations. You can instead provide an atomic `rateLimit.customStorage.consume` implementation backed by a strongly consistent service such as Redis or Durable Objects. `storage: "memory"` is suitable for development, but Worker isolates do not share counters.
+
+Database-backed rate limiting requires Better Auth's rate-limit table. Generate the schema with the same `auth` package version you deploy and apply it with your migration tooling. Better Auth 1.7.3 validates the Drizzle schema you pass against the tables it expects (`advanced.database.validateSchema`, on by default) and fails writes with `SchemaMismatchError` (logged as `Drizzle schema mismatch`) while they disagree, so regenerate `auth.schema.ts` whenever you change an option that adds a table.
+
+### KV session consistency
+
+Better Auth accepts a positive secondary-storage session without checking the mirrored database. Workers KV changes may take 60 seconds or more to appear in another location, so logout and other direct token revocations can lag.
+
+Better Auth also updates each user's active-session list with separate secondary-storage reads and writes. Concurrent session changes can lose a token reference. Bulk revocation, role or ban changes, or user deletion may then miss that cached token until its original session expiry. A strongly consistent full secondary store removes KV propagation lag for direct token reads and deletes, but it does not make the active-session update atomic.
+
+`session.storeSessionInDatabase: true` does not repair a stale positive hit. Strict bulk revocation and immediate user or authorization changes require omitting secondary session caching and leaving `session.cookieCache` disabled unless Better Auth adds an atomic active-list update.
+
 ### `createKVStorage(kv)`
 
-If you need to wire secondary storage manually (without `withCloudflare`):
+`createKVStorage()` exposes the `get`, `set`, and `delete` operations Workers KV can provide. It does not claim Better Auth 1.7's full `SecondaryStorage` contract. For Better Auth 1.7, use `withCloudflare()` as shown above. Manual wiring remains available for Better Auth 1.5 and 1.6:
 
 ```typescript
 import { createKVStorage, cloudflare } from "better-auth-cloudflare";
@@ -154,29 +173,13 @@ const auth = betterAuth({
 
 ### KV TTL Limitation
 
-Cloudflare KV enforces a **minimum TTL of 60 seconds**. `createKVStorage` clamps lower values automatically and logs a warning. Configure rate limit `window` accordingly:
+Workers KV enforces a **minimum physical TTL of 60 seconds**. `createKVStorage` clamps shorter TTLs to 60 seconds and logs a warning. Better Auth 1.5 and 1.6 rate limiting keeps its own timestamps, so a shorter logical window can still expire while the KV key remains stored. Do not weaken Better Auth's protected sign-in rules just to match KV's physical TTL. This limitation does not apply when Better Auth 1.7 uses database or custom rate-limit storage.
 
-```typescript
-rateLimit: {
-    enabled: true,
-    window: 60, // Must be >= 60 when using KV
-    max: 100,
-},
-```
+### Upgrading to Better Auth 1.7
 
-Better Auth's built-in sign-in endpoints have their own default rate limit windows that may be lower than 60s, which causes KV write errors. Override them explicitly ([better-auth#5452](https://github.com/better-auth/better-auth/issues/5452)):
+Use Better Auth 1.7.3 or later, and pin `better-auth`, `auth`, and every `@better-auth/*` package to the same release. Releases 1.7.0 through 1.7.2 added a required `issuer` column to the account table and a unique index on `issuer` and `accountId`; 1.7.3 removed both, so the core account schema is unchanged from 1.6 and a populated 1.6 database needs no backfill. Check for duplicate `(providerId, accountId)` rows first; 1.7 rejects account lookups that match more than one row. Regenerate `auth.schema.ts` with the 1.7.3 CLI and apply the diff with your migration tooling: it adds the rate-limit table when `rateLimit.storage` is `"database"` and, with `usePlural`, renames relation keys from `users` to `user`, which affects your own `with:` queries.
 
-```typescript
-rateLimit: {
-    enabled: true,
-    window: 60,
-    max: 100,
-    customRules: {
-        "/sign-in/email": { window: 60, max: 5 },
-        "/sign-in/social": { window: 60, max: 5 },
-    },
-},
-```
+If you already applied the 1.7.0–1.7.2 account schema, relax the `issuer` column and drop the index as described in the [upgrade guide](https://better-auth.com/docs/guides/1-7-upgrade-guide#account-identity-keeps-the-provider-key) before deploying 1.7.3. The rest of the [upgrade guide](https://better-auth.com/docs/guides/1-7-upgrade-guide) still applies.
 
 ---
 
@@ -308,14 +311,16 @@ withCloudflare(
 
 ---
 
-## `wrangler.toml` Reference
+## Wrangler configuration reference
+
+The `migrate` command searches the current directory and its parents for `wrangler.json`, then `wrangler.jsonc`, then `wrangler.toml`.
 
 Complete example with all supported binding types. Include only what you need.
 
 ```toml
 name = "my-auth-app"
 main = "src/index.ts"
-compatibility_date = "2025-03-01"
+compatibility_date = "2025-04-01"
 compatibility_flags = ["nodejs_compat"]
 
 [observability]
@@ -356,9 +361,9 @@ BETTER_AUTH_EMAIL_FROM = "auth@example.com"
 BETTER_AUTH_TRUSTED_ORIGINS = "https://your-app.example.com"
 ```
 
-### Binding Names and `env.d.ts`
+### Binding names and `env.d.ts`
 
-The `binding` value in `wrangler.toml` determines the property name on `env`. Declare them for type safety:
+Each `binding` becomes a property on `env`. Declare those properties in `env.d.ts` so TypeScript checks binding access:
 
 ```typescript
 import type { D1Database, Hyperdrive, KVNamespace, R2Bucket, SendEmail } from "@cloudflare/workers-types";

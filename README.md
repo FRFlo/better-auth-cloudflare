@@ -65,6 +65,7 @@ Demo implementations are available in the [`examples/`](./examples/) directory f
     - [3. Configure Better Auth (`src/auth/index.ts`)](#3-configure-better-auth-srcauthindexts)
     - [4. Generate and Manage Auth Schema](#4-generate-and-manage-auth-schema)
     - [5. Configure KV as Secondary Storage (Optional)](#5-configure-kv-as-secondary-storage-optional)
+        - [Important: KV and session revocation](#important-kv-and-session-revocation)
     - [6. Set Up API Routes](#6-set-up-api-routes)
     - [7. Initialize the Client](#7-initialize-the-client)
 - [Usage Examples](#usage-examples)
@@ -124,13 +125,13 @@ bun add better-auth-cloudflare
 
 ## Configuration Options
 
-| Option                | Type    | Default     | Description                                    |
-| --------------------- | ------- | ----------- | ---------------------------------------------- |
-| `autoDetectIpAddress` | boolean | `true`      | Auto-detect IP address from Cloudflare headers |
-| `geolocationTracking` | boolean | `true`      | Track geolocation data in the session table    |
-| `cf`                  | object  | `{}`        | Cloudflare geolocation context                 |
-| `r2`                  | object  | `undefined` | R2 bucket configuration for file storage       |
-| `email`               | object  | `undefined` | Cloudflare Email Sending configuration         |
+| Option                | Type               | Default     | Description                                                                              |
+| --------------------- | ------------------ | ----------- | ---------------------------------------------------------------------------------------- |
+| `autoDetectIpAddress` | boolean            | `true`      | Auto-detect IP address from Cloudflare headers                                           |
+| `geolocationTracking` | boolean            | `true`      | Track geolocation data in the session table                                              |
+| `cf`                  | object or function | `undefined` | Request geolocation context; pass a function when one auth instance serves many requests |
+| `r2`                  | object             | `undefined` | R2 bucket configuration for file storage                                                 |
+| `email`               | object             | `undefined` | Cloudflare Email Sending configuration                                                   |
 
 For the full `WithCloudflareOptions` interface (including database, KV, Email, and Drizzle adapter options), see the [Configuration Reference](./docs/configuration.md).
 
@@ -250,21 +251,12 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                 emailVerification: {
                     sendOnSignUp: true,
                 },
+                verification: {
+                    storeInDatabase: true,
+                },
                 rateLimit: {
                     enabled: true,
-                    window: 60, // Minimum KV TTL is 60s
-                    max: 100, // reqs/window
-                    customRules: {
-                        // https://github.com/better-auth/better-auth/issues/5452
-                        "/sign-in/email": {
-                            window: 60,
-                            max: 100,
-                        },
-                        "/sign-in/social": {
-                            window: 60,
-                            max: 100,
-                        },
-                    },
+                    storage: "database",
                 },
             }
         ),
@@ -427,30 +419,50 @@ If you provide a KV namespace in the `withCloudflare` configuration (as shown in
 
 Ensure your KV namespace (e.g., `USER_SESSIONS`) is correctly bound in your `wrangler.toml` file.
 
-#### Important: KV TTL Limitation
+#### Important: KV and session revocation
 
-Cloudflare KV has a minimum TTL (Time To Live) requirement of **60 seconds**. If you're using KV for secondary storage with rate limiting enabled, you **must** configure your rate limit windows to be at least 60 seconds to prevent crashes:
+Better Auth resolves a session by checking secondary storage **before** the database, and returns immediately on a hit without consulting the database:
+
+```js
+// better-auth: internal-adapter, findSession
+if (secondaryStorage) {
+    const sessionStringified = await secondaryStorage.get(token);
+    if (sessionStringified) {
+        // returns here; the database is never consulted
+    }
+}
+```
+
+Workers KV is [eventually consistent](https://developers.cloudflare.com/kv/concepts/how-kv-works/). Changes may take 60 seconds or more to appear in another location. A stale positive session hit therefore bypasses the mirrored database after logout or another direct token revocation.
+
+Better Auth also maintains each user's active-session list with separate secondary-storage reads and writes. Concurrent session changes can lose a token reference, so bulk revocation, role or ban changes, or user deletion may miss that cached token until its original session expiry. A strongly consistent secondary store removes KV propagation lag for direct token reads and deletes, but it does not make the active-session update atomic.
+
+`session.storeSessionInDatabase: true` does not repair a stale positive hit. If bulk revocation, role or ban changes, or user deletion must take effect immediately everywhere, omit secondary session caching and leave `session.cookieCache` disabled unless Better Auth adds an atomic active-list update.
+
+#### Better Auth 1.7 atomic storage requirements
+
+Better Auth 1.7 requires secondary storage to atomically consume verification values and increment rate-limit counters. Workers KV cannot provide either operation. When using KV with Better Auth 1.7, route those operations explicitly:
 
 ```typescript
+verification: {
+    storeInDatabase: true,
+},
 rateLimit: {
-    enabled: true,
-    window: 60, // Minimum KV TTL is 60s
-    max: 100, // reqs/window
-    customRules: {
-        // https://github.com/better-auth/better-auth/issues/5452
-        "/sign-in/email": {
-            window: 60,
-            max: 100,
-        },
-        "/sign-in/social": {
-            window: 60,
-            max: 100,
-        },
-    },
+    storage: "database",
 },
 ```
 
-The library automatically enforces this minimum and will log a warning if a TTL less than 60 seconds is attempted, but it's better to configure your rate limits correctly from the start.
+`withCloudflare()` validates this routing when Better Auth initializes and does not select a storage backend for you.
+
+Database-backed rate limiting typically adds at least one database read and one write to accepted Better Auth requests. Contention, resets, cleanup, and rejected requests can add operations. This affects latency and billing, so the library does not enable it automatically. `rateLimit.customStorage` can provide an atomic `consume` implementation backed by a strongly consistent store such as Redis or Durable Objects. `storage: "memory"` avoids database traffic but is not a distributed rate limit on Workers.
+
+`createKVStorage()` deliberately exposes only KV's non-atomic `get`, `set`, and `delete` operations. Use `withCloudflare()` for Better Auth 1.7 so the package can wire KV session storage while the settings above keep atomic operations elsewhere.
+
+Database-backed rate limiting requires Better Auth's rate-limit table; regenerate `auth.schema.ts` with the same `auth` CLI version you deploy. On Better Auth 1.7, use 1.7.3 or later; see [Upgrading to Better Auth 1.7](docs/configuration.md#upgrading-to-better-auth-17).
+
+#### Important: KV TTL Limitation
+
+Workers KV has a minimum physical TTL of 60 seconds. `createKVStorage()` clamps shorter TTLs to 60 seconds and logs a warning. Better Auth 1.5 and 1.6 rate limiting keeps its own timestamps, so a shorter logical window can still expire while the KV key remains stored. Do not weaken Better Auth's protected sign-in rules just to match KV's physical TTL.
 
 ### 6. Set Up API Routes
 

@@ -13,6 +13,8 @@ import type { drizzle as d1Drizzle } from "drizzle-orm/d1";
 import type { drizzle as mysqlDrizzle } from "drizzle-orm/mysql2";
 import type { drizzle as postgresDrizzle } from "drizzle-orm/postgres-js";
 
+type CloudflareGeolocationSource = CloudflareGeolocation | null | undefined;
+
 export interface CloudflarePluginOptions {
     /**
      * Auto-detect IP address
@@ -27,9 +29,13 @@ export interface CloudflarePluginOptions {
     geolocationTracking?: boolean;
 
     /**
-     * Cloudflare geolocation context
+     * Cloudflare geolocation context, or a function that resolves it per
+     * request when one auth instance serves many requests.
      */
-    cf?: CloudflareGeolocation | Promise<CloudflareGeolocation | null> | null;
+    cf?:
+        | CloudflareGeolocationSource
+        | Promise<CloudflareGeolocationSource>
+        | (() => CloudflareGeolocationSource | Promise<CloudflareGeolocationSource>);
 
     /**
      * R2 configuration for user file tracking
@@ -79,6 +85,23 @@ export interface WithCloudflareOptions extends CloudflarePluginOptions {
 
     /**
      * KV namespace for secondary storage, if you want to use that.
+     *
+     * Workers KV does not support Better Auth 1.7's atomic `getAndDelete` and
+     * `increment` operations. When using KV with Better Auth 1.7, configure
+     * `verification.storeInDatabase: true` and route rate limiting to
+     * `database`, `memory`, or `customStorage` explicitly. `withCloudflare`
+     * validates this when Better Auth initializes.
+     *
+     * Better Auth accepts a positive secondary-storage session without checking
+     * the database. KV changes may take 60 seconds or more to appear in another
+     * location. Better Auth also updates each user's active-session list with
+     * separate reads and writes, so concurrent changes can lose a token
+     * reference until the session expires.
+     *
+     * For strict bulk revocation or immediate user changes, leave this unset
+     * and leave `session.cookieCache` disabled.
+     *
+     * @see https://developers.cloudflare.com/kv/concepts/how-kv-works/
      */
     kv?: KVNamespace;
 

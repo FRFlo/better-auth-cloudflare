@@ -70,11 +70,10 @@ npx @better-auth-cloudflare/cli migrate              # Interactive
 npx @better-auth-cloudflare/cli migrate --migrate-target=dev  # Non-interactive
 ```
 
-The migrate command automatically detects your database configuration from `wrangler.toml`. It supports:
+`migrate` searches the current directory and its parents for `wrangler.json`, then `wrangler.jsonc`, then `wrangler.toml`. It handles:
 
-- **D1 databases**: Offers migration options (dev/remote)
-- **Hyperdrive databases**: Shows informational message
-- **Multiple databases**: Prompts you to choose which D1 database to migrate
+- D1 databases with local and remote migration options
+- Hyperdrive databases with migration guidance
 
 ## Arguments
 
@@ -88,7 +87,7 @@ The migrate command automatically detects your database configuration from `wran
 --email=<bool>                 Enable Cloudflare Email Sending integration (default: false)
 ```
 
-**KV Integration**: Provides secondary storage for Better Auth sessions, rate limiting, and other features. See [Better Auth secondary storage documentation](https://www.better-auth.com/docs/reference/options#secondarystorage).
+**KV Integration**: KV holds the session cache. Better Auth 1.7 needs atomic verification and rate-limit storage that KV cannot provide, so generated projects set `verification.storeInDatabase` and `rateLimit.storage: "database"`; `withCloudflare()` validates the routing when Better Auth initializes. See the [KV configuration guide](../docs/configuration.md#kv-secondary-storage).
 
 **R2 Integration**: Enables file upload and management capabilities. See [R2 setup guide](../docs/r2.md) for detailed configuration and usage.
 

@@ -13,13 +13,7 @@ export * from "./types";
 export * from "./r2";
 export * from "./email";
 
-/**
- * Cloudflare integration for Better Auth
- *
- * @param options - Plugin configuration options
- * @returns Better Auth plugin for Cloudflare
- */
-export const cloudflare = (options?: CloudflarePluginOptions) => {
+const createCloudflarePlugin = (options?: CloudflarePluginOptions, validateStorage = false) => {
     const opts = options ?? {};
 
     // Default geolocationTracking to true if not specified
@@ -42,7 +36,7 @@ export const cloudflare = (options?: CloudflarePluginOptions) => {
                         return ctx.json({ error: "Unauthorized" }, { status: 401 });
                     }
 
-                    const cf = await Promise.resolve(opts.cf);
+                    const cf = await resolveCloudflareGeolocation(opts.cf);
                     if (!cf) {
                         return ctx.json({ error: "Cloudflare context is not available" }, { status: 404 });
                     }
@@ -57,6 +51,9 @@ export const cloudflare = (options?: CloudflarePluginOptions) => {
         },
 
         init(init_ctx) {
+            if (validateStorage) {
+                assertAtomicStorageCompatibility(init_ctx.version, init_ctx.options);
+            }
             if (opts.r2) {
                 r2Storage = createR2Storage(opts.r2, init_ctx.generateId);
             }
@@ -70,7 +67,7 @@ export const cloudflare = (options?: CloudflarePluginOptions) => {
                                     _context: GenericEndpointContext | null
                                 ) => {
                                     if (!geolocationTrackingEnabled) return;
-                                    const cf = await Promise.resolve(opts.cf);
+                                    const cf = await resolveCloudflareGeolocation(opts.cf);
                                     if (!cf) return;
                                     const geoData = extractGeolocationData(cf);
                                     return {
@@ -88,6 +85,85 @@ export const cloudflare = (options?: CloudflarePluginOptions) => {
         },
     } satisfies BetterAuthPlugin;
 };
+
+/**
+ * Cloudflare integration for Better Auth
+ *
+ * @param options - Plugin configuration options
+ * @returns Better Auth plugin for Cloudflare
+ */
+export const cloudflare = (options?: CloudflarePluginOptions) => createCloudflarePlugin(options);
+
+type AtomicSecondaryStorage = {
+    getAndDelete?: unknown;
+    increment?: unknown;
+};
+
+type AtomicRateLimitStorage = {
+    consume?: unknown;
+    get?: unknown;
+    set?: unknown;
+};
+
+function parseVersion(version: string): [major: number, minor: number] | null {
+    const match = /^(\d+)\.(\d+)/.exec(version.trim());
+    return match ? [Number(match[1]), Number(match[2])] : null;
+}
+
+function assertAtomicStorageCompatibility(version: string, options: BetterAuthOptions): void {
+    const parsed = parseVersion(version);
+    const rateLimiting = options.rateLimit?.enabled !== false;
+    const customStorage = options.rateLimit?.customStorage as AtomicRateLimitStorage | undefined;
+    const legacyRateLimitStorage =
+        customStorage && typeof customStorage.get === "function" && typeof customStorage.set === "function";
+    if (parsed?.[0] === 1 && parsed[1] < 6 && rateLimiting && customStorage && !legacyRateLimitStorage) {
+        throw new Error(
+            `Better Auth ${version} rate limiting calls customStorage.get and set; consume-only storage needs 1.6 or later.`
+        );
+    }
+    const usesAtomicContract = !parsed || parsed[0] > 1 || (parsed[0] === 1 && parsed[1] >= 7);
+    if (!usesAtomicContract) return;
+
+    const problems: string[] = [];
+    if (rateLimiting && customStorage && typeof customStorage.consume !== "function") {
+        problems.push("rateLimit.customStorage requires an atomic consume function");
+    }
+    if (options.verification?.storeInDatabase === true && !options.database) {
+        problems.push("verification.storeInDatabase requires a database");
+    }
+    if (rateLimiting && !customStorage && options.rateLimit?.storage === "database" && !options.database) {
+        problems.push('rateLimit.storage "database" requires a database');
+    }
+
+    const storage = options.secondaryStorage as (SecondaryStorage & AtomicSecondaryStorage) | undefined;
+    if (storage) {
+        if (options.verification?.storeInDatabase !== true && typeof storage.getAndDelete !== "function") {
+            problems.push("verification requires a database or secondaryStorage.getAndDelete");
+        }
+
+        if (
+            rateLimiting &&
+            !customStorage &&
+            (options.rateLimit?.storage ?? "secondary-storage") === "secondary-storage" &&
+            typeof storage.increment !== "function"
+        ) {
+            problems.push(
+                "secondary-storage rate limiting requires secondaryStorage.increment; rate limiting is on by default in production"
+            );
+        }
+    }
+
+    if (problems.length > 0) {
+        throw new Error(
+            `Better Auth ${version} storage is not atomic: ${problems.join("; ")}. ` +
+                "Route verification and rate limiting to the database or provide atomic storage."
+        );
+    }
+}
+
+async function resolveCloudflareGeolocation(source: CloudflarePluginOptions["cf"]) {
+    return typeof source === "function" ? source() : source;
+}
 
 /**
  * Safely extracts CloudflareGeolocation data, ignoring undefined values or other fields
@@ -112,10 +188,17 @@ function extractGeolocationData(input: CloudflareGeolocation): CloudflareGeoloca
 /**
  * Creates secondary storage using Cloudflare KV
  *
+ * Workers KV cannot provide Better Auth 1.7's atomic `getAndDelete` and
+ * `increment` operations, so this adapter intentionally does not advertise
+ * them. Route verification and rate limiting to a database or another
+ * strongly consistent store when using Better Auth 1.7.
+ *
  * @param kv - Cloudflare KV namespace
- * @returns SecondaryStorage implementation
+ * @returns KV-backed get, set, and delete operations
  */
-export const createKVStorage = (kv: KVNamespace): SecondaryStorage => {
+export type CloudflareKVStorage = Pick<SecondaryStorage, "get" | "set" | "delete">;
+
+export const createKVStorage = (kv: KVNamespace): CloudflareKVStorage => {
     return {
         get: async (key: string) => {
             return kv.get(key);
@@ -189,7 +272,7 @@ export const withCloudflare = <T extends BetterAuthOptions>(
         // For now, let's assume if autoDetectIpEnabled is false, the user manages headers explicitly.
     }
 
-    let updatedSession = { ...options.session };
+    const updatedSession = { ...options.session };
     if (geolocationTrackingForSession) {
         updatedSession.storeSessionInDatabase = true;
     } else if (options.session?.storeSessionInDatabase === undefined) {
@@ -210,7 +293,7 @@ export const withCloudflare = <T extends BetterAuthOptions>(
         );
     }
 
-    let database: ReturnType<typeof drizzleAdapter> | D1Database | undefined;
+    let database = options.database;
     if (cloudFlareOptions.d1Native) {
         database = cloudFlareOptions.d1Native;
     } else if (cloudFlareOptions.postgres) {
@@ -230,14 +313,21 @@ export const withCloudflare = <T extends BetterAuthOptions>(
         });
     }
 
-    const plugins = [cloudflare(cloudFlareOptions), ...(options.plugins ?? [])] as MergedPlugins<T>;
+    if (cloudFlareOptions.kv && options.secondaryStorage) {
+        throw new Error("Configure either withCloudflare({ kv }) or authOptions.secondaryStorage, not both.");
+    }
+
+    const plugins = [createCloudflarePlugin(cloudFlareOptions, true), ...(options.plugins ?? [])] as MergedPlugins<T>;
+    const secondaryStorage = cloudFlareOptions.kv
+        ? (createKVStorage(cloudFlareOptions.kv) as SecondaryStorage)
+        : options.secondaryStorage;
     const emailOptions = createEmailOptions(cloudFlareOptions.email, options);
 
     return {
         ...options,
         ...emailOptions,
         database,
-        secondaryStorage: cloudFlareOptions.kv ? createKVStorage(cloudFlareOptions.kv) : undefined,
+        secondaryStorage,
         plugins,
         advanced: updatedAdvanced,
         session: updatedSession,

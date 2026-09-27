@@ -86,7 +86,7 @@ async function authBuilder() {
             {
                 autoDetectIpAddress: true,
                 geolocationTracking: true,
-                cf: cfCtx.cf,
+                cf: () => getCloudflareContext().cf,
                 d1: {
                     db: dbInstance,
                     options: {
@@ -99,10 +99,12 @@ async function authBuilder() {
             {
                 baseURL: cfCtx.env.BETTER_AUTH_URL,
                 trustedOrigins: (cfCtx.env.BETTER_AUTH_TRUSTED_ORIGINS ?? "").split(",").filter(Boolean),
+                verification: {
+                    storeInDatabase: true,
+                },
                 rateLimit: {
                     enabled: true,
-                    window: 60, // Minimum KV TTL is 60s
-                    max: 100, // reqs/window
+                    storage: "database",
                 },
                 plugins: [openAPI(), anonymous()],
             }
@@ -154,15 +156,20 @@ export const auth = betterAuth({
             },
         },
         {
+            rateLimit: {
+                enabled: true,
+                storage: "database",
+            },
             plugins: [openAPI(), anonymous()],
         }
     ),
 
-    database: drizzleAdapter(process.env.DATABASE as any, {
+    database: drizzleAdapter({} as any, {
         provider: "sqlite",
         usePlural: true,
         debugLogs: true,
     }),
+    advanced: { database: { validateSchema: false } },
 });
 ```
 

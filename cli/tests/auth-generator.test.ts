@@ -17,6 +17,9 @@ describe("Auth Generator", () => {
             // Check imports
             expect(result).toContain('import { drizzle } from "drizzle-orm/d1"');
             expect(result).toContain('import { schema } from "../db"');
+            expect(result).toContain(
+                'if (env && !env.BETTER_AUTH_SECRET) throw new Error("BETTER_AUTH_SECRET is not set.");'
+            );
             expect(result).toContain('import type { CloudflareBindings } from "../env"');
 
             // Check D1 configuration
@@ -32,6 +35,9 @@ describe("Auth Generator", () => {
             expect(result).not.toContain("kv: env");
             expect(result).not.toContain("r2: {");
             expect(result).not.toContain("postgres: {");
+
+            expect(result).not.toContain("storeInDatabase");
+            expect(result).toContain('storage: "database"');
         });
 
         test("generates Hyperdrive PostgreSQL configuration", () => {
@@ -46,14 +52,17 @@ describe("Auth Generator", () => {
 
             // Check imports
             expect(result).toContain('import { drizzle } from "drizzle-orm/postgres-js"');
+            expect(result).toContain('import postgres from "postgres"');
+            expect(result).toContain(
+                "postgres(env.HYPERDRIVE.connectionString, { max: 5, fetch_types: false, prepare: true })"
+            );
             expect(result).not.toContain('import { drizzle } from "drizzle-orm/d1"');
 
             // Check PostgreSQL configuration
-            expect(result).toContain("postgres: {");
-            expect(result).toContain("db");
+            expect(result).toContain("postgres: env");
             expect(result).toContain('provider: "pg"');
+            expect(result.match(/usePlural: true/g)).toHaveLength(2);
 
-            // Should not contain D1
             expect(result).not.toContain("d1: env");
         });
 
@@ -68,6 +77,8 @@ describe("Auth Generator", () => {
             const result = generateAuthFile(config);
 
             expect(result).toContain("kv: env?.MY_KV");
+            expect(result).toContain("storeInDatabase: true");
+            expect(result).toContain('storage: "database"');
         });
 
         test("generates R2 configuration with custom binding", () => {
@@ -141,6 +152,8 @@ describe("Auth Generator", () => {
             expect(result).toContain("db: dbInstance");
             expect(result).toContain("usePlural: true");
 
+            expect(result).toContain("cf: () => getCloudflareContext().cf");
+
             // Check async auth builder pattern
             expect(result).toContain("async function authBuilder()");
             expect(result).toContain("let authInstance");
@@ -148,6 +161,8 @@ describe("Auth Generator", () => {
 
             // Check CLI export
             expect(result).toContain("export const auth = betterAuth({");
+
+            expect(result).not.toContain("storeInDatabase");
         });
 
         test("generates Hyperdrive PostgreSQL configuration", () => {
@@ -167,9 +182,25 @@ describe("Auth Generator", () => {
             expect(result).toContain("postgres: {");
             expect(result).toContain("db: dbInstance");
             expect(result).toContain('provider: "pg"');
+            expect(result.match(/usePlural: true/g)).toHaveLength(2);
 
             // Should not contain D1
             expect(result).not.toContain("d1: {");
+        });
+
+        test("generates Hyperdrive MySQL configuration without a shared auth instance", () => {
+            const result = generateAuthFile({
+                template: "nextjs",
+                database: "mysql",
+                resources: { d1: false, kv: false, r2: false, hyperdrive: true },
+                bindings: { hyperdrive: "HYPERDRIVE" },
+            });
+
+            expect(result).toContain("mysql: {");
+            expect(result).toContain('provider: "mysql"');
+            expect(result.match(/usePlural: true/g)).toHaveLength(2);
+            expect(result).not.toContain("authInstance");
+            expect(result).toContain("export async function initAuth() {\n    return authBuilder();");
         });
 
         test("generates KV configuration with custom binding", () => {
@@ -183,6 +214,8 @@ describe("Auth Generator", () => {
             const result = generateAuthFile(config);
 
             expect(result).toContain("kv: cfCtx.env.MY_KV");
+            expect(result).toContain("storeInDatabase: true");
+            expect(result.match(/storage: "database"/g)).toHaveLength(2);
         });
 
         test("generates R2 configuration with schema generation", () => {
@@ -265,6 +298,10 @@ describe("Auth Generator", () => {
             const result = generateAuthFile(config);
 
             expect(result).toContain('import { drizzle } from "drizzle-orm/mysql2"');
+            expect(result).toContain("mysql.createPool({ uri: env.HYPERDRIVE.connectionString, disableEval: true })");
+            expect(result).toContain('mode: "default"');
+            expect(result).toContain("mysql: env");
+            expect(result.match(/usePlural: true/g)).toHaveLength(2);
             expect(result).toContain('provider: "mysql"');
             expect(result).toContain("drizzleAdapter({} as any");
         });

@@ -10,9 +10,11 @@ import type { CloudflareBindings } from "../env";
 // Single auth configuration that handles both CLI and runtime scenarios
 function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, baseURL?: string) {
     const db = env ? drizzle(env.DATABASE, { schema, logger: true }) : ({} as any);
+    if (env && !env.BETTER_AUTH_SECRET) throw new Error("BETTER_AUTH_SECRET is not set.");
 
     return betterAuth({
         baseURL,
+        secret: env?.BETTER_AUTH_SECRET,
         ...withCloudflare(
             {
                 autoDetectIpAddress: true,
@@ -45,21 +47,12 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                     sendOnSignUp: true,
                 },
                 plugins: [anonymous()],
+                verification: {
+                    storeInDatabase: true,
+                },
                 rateLimit: {
                     enabled: true,
-                    window: 60, // Minimum KV TTL is 60s
-                    max: 100, // reqs/window
-                    customRules: {
-                        // https://github.com/better-auth/better-auth/issues/5452
-                        "/sign-in/email": {
-                            window: 60,
-                            max: 100,
-                        },
-                        "/sign-in/social": {
-                            window: 60,
-                            max: 100,
-                        },
-                    },
+                    storage: "database",
                 },
             }
         ),
@@ -72,6 +65,7 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                       usePlural: true,
                       debugLogs: true,
                   }),
+                  advanced: { database: { validateSchema: false } },
               }),
     });
 }
