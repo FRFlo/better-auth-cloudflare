@@ -4,6 +4,7 @@ import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { createAuthEndpoint, sessionMiddleware } from "better-auth/api";
 import { schema } from "./schema";
 import { createR2Storage, createR2Endpoints } from "./r2";
+import { createEmailOptions } from "./email";
 import type {
     CloudflareGeolocation,
     CloudflarePluginOptions,
@@ -15,6 +16,7 @@ export * from "./client";
 export * from "./schema";
 export * from "./types";
 export * from "./r2";
+export * from "./email";
 
 type R2Endpoints = ReturnType<typeof createR2Endpoints>;
 // Required when r2 is set, absent when it is not, optional when the options type can't tell.
@@ -329,9 +331,11 @@ export const withCloudflare = <T extends BetterAuthOptions, C extends WithCloudf
     const secondaryStorage = cloudFlareOptions.kv
         ? (createKVStorage(cloudFlareOptions.kv) as SecondaryStorage)
         : options.secondaryStorage;
+    const emailOptions = createEmailOptions(cloudFlareOptions.email, options);
 
     return {
         ...options,
+        ...emailOptions,
         database,
         secondaryStorage,
         plugins,

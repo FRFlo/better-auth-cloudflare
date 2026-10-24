@@ -1,6 +1,7 @@
 import type { AuthContext, Session, User } from "better-auth";
 import type { DrizzleAdapterConfig } from "@better-auth/drizzle-adapter";
 import type { DBFieldAttribute } from "better-auth/db";
+import type { EmailAddress, EmailSendResult, SendEmail } from "@cloudflare/workers-types";
 import type { drizzle as d1Drizzle } from "drizzle-orm/d1";
 import type { drizzle as mysqlDrizzle } from "drizzle-orm/mysql2";
 import type { drizzle as postgresDrizzle } from "drizzle-orm/postgres-js";
@@ -118,6 +119,80 @@ export interface WithCloudflareOptions extends CloudflarePluginOptions {
      * @see https://developers.cloudflare.com/kv/concepts/how-kv-works/
      */
     kv?: KVNamespace;
+
+    /**
+     * Cloudflare Email Sending configuration for Better Auth transactional emails.
+     * When provided, withCloudflare wires default verification and password reset
+     * callbacks unless custom callbacks are already configured in Better Auth.
+     */
+    email?: CloudflareEmailConfig;
+}
+
+export type CloudflareEmailAddress = string | EmailAddress;
+
+export interface CloudflareEmailTemplateContext {
+    user: User;
+    url: string;
+    token: string;
+    request?: Request;
+}
+
+export interface CloudflareEmailContent {
+    subject: string;
+    text?: string;
+    html?: string;
+}
+
+export type CloudflareEmailTemplate = (
+    context: CloudflareEmailTemplateContext
+) => CloudflareEmailContent | Promise<CloudflareEmailContent>;
+
+export interface CloudflareEmailMessage extends CloudflareEmailContent {
+    to: string | string[];
+    from?: CloudflareEmailAddress;
+    replyTo?: CloudflareEmailAddress;
+    cc?: string | string[];
+    bcc?: string | string[];
+    headers?: Record<string, string>;
+}
+
+export type CloudflareEmailSender = (message: CloudflareEmailMessage) => Promise<EmailSendResult>;
+
+export interface CloudflareEmailConfig {
+    /**
+     * Cloudflare Email Sending binding from wrangler.toml.
+     */
+    binding: SendEmail;
+
+    /**
+     * Default sender address. The domain must be onboarded in Cloudflare Email Service.
+     */
+    from: CloudflareEmailAddress;
+
+    /**
+     * Optional default Reply-To address for transactional emails.
+     */
+    replyTo?: CloudflareEmailAddress;
+
+    /**
+     * Set to false to avoid auto-wiring Better Auth email verification.
+     * @default true
+     */
+    sendVerificationEmail?: boolean;
+
+    /**
+     * Set to false to avoid auto-wiring Better Auth password reset emails.
+     * @default true
+     */
+    sendResetPassword?: boolean;
+
+    /**
+     * Optional custom message templates for Better Auth transactional emails.
+     */
+    templates?: {
+        verification?: CloudflareEmailTemplate;
+        passwordReset?: CloudflareEmailTemplate;
+    };
 }
 
 /**

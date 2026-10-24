@@ -1,6 +1,6 @@
 # better-auth-cloudflare
 
-Seamlessly integrate [Better Auth](https://github.com/better-auth/better-auth) with Cloudflare Workers, D1, Hyperdrive, KV, R2, and geolocation services.
+Seamlessly integrate [Better Auth](https://github.com/better-auth/better-auth) with Cloudflare Workers, D1, Hyperdrive, KV, R2, Email, and geolocation services.
 
 [![NPM Version](https://img.shields.io/npm/v/better-auth-cloudflare)](https://www.npmjs.com/package/better-auth-cloudflare)
 [![NPM Downloads](https://img.shields.io/npm/dt/better-auth-cloudflare)](https://www.npmjs.com/package/better-auth-cloudflare)
@@ -19,6 +19,7 @@ Demo implementations are available in the [`examples/`](./examples/) directory f
 - 🚀 **Hyperdrive Support**: Connect to Postgres and MySQL databases through Cloudflare Hyperdrive.
 - 🔌 **KV Storage Integration**: Optionally use Cloudflare KV for secondary storage (e.g., session caching).
 - 📁 **R2 File Storage**: Upload, download, and manage user files with Cloudflare R2 object storage and database tracking.
+- ✉️ **Cloudflare Email**: Send Better Auth verification and password reset emails through Cloudflare Email Sending.
 - 📍 **Automatic Geolocation Tracking**: Enrich user sessions with location data derived from Cloudflare.
 - 🌐 **Cloudflare IP Detection**: Utilize Cloudflare's IP detection headers out-of-the-box.
 - 🔍 **Rich Client-Side Context**: Access timezone, city, country, region, and more via the client plugin.
@@ -32,7 +33,7 @@ Demo implementations are available in the [`examples/`](./examples/) directory f
 - [x] Hyperdrive (Postgres/MySQL)
 - [x] KV
 - [x] R2
-- [ ] Cloudflare Email
+- [x] Cloudflare Email
 - [ ] Cloudflare Images
 - [ ] Durable Objects
 - [ ] D1 Multi-Tenancy
@@ -104,7 +105,7 @@ npx @better-auth-cloudflare/cli@latest migrate                         # Interac
 npx @better-auth-cloudflare/cli@latest migrate --migrate-target=prod   # Non-interactive
 ```
 
-The CLI creates projects from Hono or Next.js templates and can automatically set up D1, KV, R2, and Hyperdrive resources. See [CLI Documentation](./cli/README.md) for full documentation and all available arguments.
+The CLI creates projects from Hono or Next.js templates and can automatically set up D1, KV, R2, Hyperdrive, and Cloudflare Email bindings. See [CLI Documentation](./cli/README.md) for full documentation and all available arguments.
 
 **Troubleshooting**:
 
@@ -130,8 +131,9 @@ bun add better-auth-cloudflare
 | `geolocationTracking` | boolean            | `true`      | Track geolocation data in the session table                                              |
 | `cf`                  | object or function | `undefined` | Request geolocation context; pass a function when one auth instance serves many requests |
 | `r2`                  | object             | `undefined` | R2 bucket configuration for file storage                                                 |
+| `email`               | object             | `undefined` | Cloudflare Email Sending configuration                                                   |
 
-For the full `WithCloudflareOptions` interface (including database, KV, and Drizzle adapter options), see the [Configuration Reference](./docs/configuration.md).
+For the full `WithCloudflareOptions` interface (including database, KV, Email, and Drizzle adapter options), see the [Configuration Reference](./docs/configuration.md).
 
 ## Setup
 
@@ -217,23 +219,37 @@ function createAuth(env?: CloudflareBindings, cf?: IncomingRequestCfProperties, 
                       }
                     : undefined,
                 kv: env?.KV,
-                // Optional: Enable R2 file storage
-                r2: env?.R2_BUCKET
+                // Optional: Send verification and password reset emails with Cloudflare Email
+                ...(env?.EMAIL
                     ? {
-                          bucket: env.R2_BUCKET,
-                          maxFileSize: 10 * 1024 * 1024, // 10MB
-                          allowedTypes: [".jpg", ".jpeg", ".png", ".gif", ".pdf", ".doc", ".docx"], // filename extensions
-                          additionalFields: {
-                              category: { type: "string", required: false },
-                              isPublic: { type: "boolean", required: false },
-                              description: { type: "string", required: false },
+                          email: {
+                              binding: env.EMAIL,
+                              from: env.BETTER_AUTH_EMAIL_FROM,
                           },
                       }
-                    : undefined,
+                    : {}),
+                // Optional: Enable R2 file storage
+                ...(env?.R2_BUCKET
+                    ? {
+                          r2: {
+                              bucket: env.R2_BUCKET,
+                              maxFileSize: 10 * 1024 * 1024, // 10MB
+                              allowedTypes: [".jpg", ".jpeg", ".png", ".gif", ".pdf", ".doc", ".docx"],
+                              additionalFields: {
+                                  category: { type: "string", required: false },
+                                  isPublic: { type: "boolean", required: false },
+                                  description: { type: "string", required: false },
+                              },
+                          },
+                      }
+                    : {}),
             },
             {
                 emailAndPassword: {
                     enabled: true,
+                },
+                emailVerification: {
+                    sendOnSignUp: true,
                 },
                 verification: {
                     storeInDatabase: true,
@@ -263,6 +279,8 @@ export const auth = createAuth();
 // Export for runtime usage
 export { createAuth };
 ```
+
+> Cloudflare Email Sending requires the `from` address to use an onboarded domain. Configure the sender domain in [Cloudflare Email Service domains](https://developers.cloudflare.com/email-service/configuration/domains/) before deploying real emails.
 
 The `baseURL` is derived per-request in Hono middleware via `new URL(c.req.url).origin`. On Cloudflare Workers, `request.url` reflects the actual URL the client connected to — Cloudflare's edge routes requests to your worker based on DNS and [route configuration](https://developers.cloudflare.com/workers/configuration/routing/routes/), not the HTTP `Host` header alone. Alternatively, you can set the `BETTER_AUTH_URL` environment variable and omit the `baseURL` parameter.
 
@@ -436,8 +454,6 @@ rateLimit: {
 
 `withCloudflare()` validates this routing when Better Auth initializes and does not select a storage backend for you.
 
-Pass `plugins` inside `withCloudflare()`'s second argument. A `plugins` key written next to `...withCloudflare(...)` replaces the Cloudflare plugin, which turns off this check, IP detection, and geolocation.
-
 Database-backed rate limiting typically adds at least one database read and one write to accepted Better Auth requests. Contention, resets, cleanup, and rejected requests can add operations. This affects latency and billing, so the library does not enable it automatically. `rateLimit.customStorage` can provide an atomic `consume` implementation backed by a strongly consistent store such as Redis or Durable Objects. `storage: "memory"` avoids database traffic but is not a distributed rate limit on Workers.
 
 `createKVStorage()` deliberately exposes only KV's non-atomic `get`, `set`, and `delete` operations. Use `withCloudflare()` for Better Auth 1.7 so the package can wire KV session storage while the settings above keep atomic operations elsewhere.
@@ -505,7 +521,7 @@ const displayLocationInfo = async () => {
         const result = await authClient.cloudflare.geolocation();
         if (result.error) {
             console.error("Error fetching geolocation:", result.error);
-        } else if (result.data) {
+        } else if (result.data && !("error" in result.data)) {
             console.log("📍 Geolocation data:", {
                 timezone: result.data.timezone,
                 city: result.data.city,
